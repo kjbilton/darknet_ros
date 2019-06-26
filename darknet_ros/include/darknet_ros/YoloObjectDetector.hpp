@@ -9,6 +9,8 @@
 #pragma once
 
 // c++
+#include <algorithm>
+#include <map>
 #include <math.h>
 #include <string>
 #include <vector>
@@ -46,6 +48,8 @@
 #endif
 
 extern "C" {
+#include "darknet.h"
+#include "matrix.h"
 #include "network.h"
 #include "detection_layer.h"
 #include "region_layer.h"
@@ -159,6 +163,9 @@ class YoloObjectDetector
   //! Camera related parameters.
   int frameWidth_;
   int frameHeight_;
+  int numCameras_;
+  std::vector<std::string> cameraFrameIDs;
+  std::map<std::string, int> cameraFrameIDsMap;
 
   //! Publisher of the bounding box image.
   ros::Publisher detectionImagePublisher_;
@@ -172,10 +179,10 @@ class YoloObjectDetector
   int demoClasses_;
 
   network *net_;
-  std_msgs::Header headerBuff_[3];
-  image buff_[3];
-  image buffLetter_[3];
-  int buffId_[3];
+  std_msgs::Header *headerBuff_[3];
+  image *buff_[3];
+  matrix buffLetter_[3];
+  int *buffId_[3];
   int buffIndex_ = 0;
   IplImage * ipl_;
   float fps_ = 0;
@@ -232,10 +239,10 @@ class YoloObjectDetector
 
   void *detectLoop(void *ptr);
 
-  void setupNetwork(char *cfgfile, char *weightfile, char *datafile, float thresh,
-                    char **names, int classes,
-                    int delay, char *prefix, int avg_frames, float hier, int w, int h,
-                    int frames, int fullscreen);
+  void setupNetwork(char *cfgfile, char *weightfile, char *datafile,
+                    float thresh, char **names, int classes, int batchsize,
+                    int delay, char *prefix, int avg_frames, float hier, int w,
+                    int h, int frames, int fullscreen);
 
   void yolo();
 

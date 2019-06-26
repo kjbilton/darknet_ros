@@ -2,6 +2,7 @@ subscribers:
 
   camera_reading:
     topic: /camera/rgb/image_raw
+    frame_ids : [frame_id]
     queue_size: 1
 
 actions:

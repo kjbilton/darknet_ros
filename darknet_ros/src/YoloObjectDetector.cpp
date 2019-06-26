@@ -121,13 +121,19 @@ void YoloObjectDetector::init()
     strcpy(detectionNames[i], classLabels_[i].c_str());
   }
 
+  // Set camera info.
+  numCameras_ = cameraFrameIDs.size();
+  for(int idx=0; idx<cameraFrameIDs.size(); idx++)
+    cameraFrameIDsMap[cameraFrameIDs[idx]] = idx;
+
   // Load network.
   setupNetwork(cfg, weights, data, thresh, detectionNames, numClasses_,
-                0, 0, 1, 0.5, 0, 0, 0, 0);
+               numCameras_, 0, 0, 1, 0.5, 0, 0, 0, 0);
   yoloThread_ = std::thread(&YoloObjectDetector::yolo, this);
 
   // Initialize publisher and subscriber.
   std::string cameraTopicName;
+  std::vector<std::string> cameraFrameIDsDefault("frame_id");
   int cameraQueueSize;
   std::string objectDetectorTopicName;
   int objectDetectorQueueSize;
@@ -141,10 +147,14 @@ void YoloObjectDetector::init()
 
   nodeHandle_.param("subscribers/camera_reading/topic", cameraTopicName,
                     std::string("/camera/image_raw"));
-  nodeHandle_.param("subscribers/camera_reading/queue_size", cameraQueueSize, 1);
+  nodeHandle_.param("subscribers/camera_reading/frame_ids", cameraFrameIDs,
+                    cameraFrameIDsDefault);
+  nodeHandle_.param("subscribers/camera_reading/queue_size", cameraQueueSize,
+                    1);
   nodeHandle_.param("publishers/object_detector/topic", objectDetectorTopicName,
                     std::string("found_object"));
-  nodeHandle_.param("publishers/object_detector/queue_size", objectDetectorQueueSize, 1);
+  nodeHandle_.param("publishers/object_detector/queue_size",
+                    objectDetectorQueueSize, 1);
   nodeHandle_.param("publishers/object_detector/latch", objectDetectorLatch, false);
   nodeHandle_.param("publishers/bounding_boxes/topic", boundingBoxesTopicName,
                     std::string("bounding_boxes"));
@@ -406,16 +416,36 @@ void *YoloObjectDetector::detectInThread()
 
 void *YoloObjectDetector::fetchInThread()
 {
-  {
-    boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
-    IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
-    IplImage* ROS_img = imageAndHeader.image;
-    ipl_into_image(ROS_img, buff_[buffIndex_]);
-    headerBuff_[buffIndex_] = imageAndHeader.header;
-    buffId_[buffIndex_] = actionId_;
+  std::vector<bool> bufferIsFull(numCameras_, false);
+  int img_idx;
+  image img;
+  std_msgs::Header hdr;
+  IplImageWithHeader_ imageAndHeader;
+  IplImage* ROS_img;
+  int id;
+
+  while (std::all_of(bufferIsFull.begin(), bufferIsFull.end(),
+         []{return true})){
+    {
+      boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
+      imageAndHeader = getIplImageWithHeader();
+      ROS_img = imageAndHeader.image;
+      ipl_to_image(ROS_img, img);
+      hdr = imageAndHeader.header;
+      id = actionId_;
+
+      img_idx = cameraFrameIDsMap[hdr.frame_id];
+      if (bufferIsFull[img_idx])
+        continue;
+        
+      rgbgr_image(img)
+      buff_[buffIndex_][img_idx] = img;
+      headerBuff_[buffIndex_][img_idx] = img;
+      bufferIsFull[img_idx] = true;
+    }
   }
-  rgbgr_image(buff_[buffIndex_]);
-  letterbox_image_into(buff_[buffIndex_], net_->w, net_->h, buffLetter_[buffIndex_]);
+  buffLetter_[buffIndex_] = imgs_to_letterbox_matrix(buff_[buffIndex_],
+                                                     numCameras_);
   return 0;
 }
 
@@ -456,7 +486,7 @@ void *YoloObjectDetector::detectLoop(void *ptr)
 }
 
 void YoloObjectDetector::setupNetwork(char *cfgfile, char *weightfile, char *datafile, float thresh,
-                                      char **names, int classes,
+                                      char **names, int classes, int batchsize,
                                       int delay, char *prefix, int avg_frames, float hier, int w, int h,
                                       int frames, int fullscreen)
 {
@@ -472,7 +502,7 @@ void YoloObjectDetector::setupNetwork(char *cfgfile, char *weightfile, char *dat
   fullScreen_ = fullscreen;
   printf("YOLO V3\n");
   net_ = load_network(cfgfile, weightfile, 0);
-  set_batch_network(net_, 1);
+  set_batch_network(net_, batchsize);
 }
 
 void YoloObjectDetector::yolo()
@@ -502,21 +532,44 @@ void YoloObjectDetector::yolo()
   layer l = net_->layers[net_->n - 1];
   roiBoxes_ = (darknet_ros::RosBox_ *) calloc(l.w * l.h * l.n, sizeof(darknet_ros::RosBox_));
 
-  {
-    boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
-    IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
-    IplImage* ROS_img = imageAndHeader.image;
-    buff_[0] = ipl_to_image(ROS_img);
-    headerBuff_[0] = imageAndHeader.header;
+  for(int idx=0; idx<=3; idx++){
+    buff_[idx] = new image[numCameras_];
+    headerBuff_[idx] = new std_msgs::Header[numCameras_];
+    buffId_[idx] = new int[numCameras_];
   }
-  buff_[1] = copy_image(buff_[0]);
-  buff_[2] = copy_image(buff_[0]);
-  headerBuff_[1] = headerBuff_[0];
-  headerBuff_[2] = headerBuff_[0];
-  buffLetter_[0] = letterbox_image(buff_[0], net_->w, net_->h);
-  buffLetter_[1] = letterbox_image(buff_[0], net_->w, net_->h);
-  buffLetter_[2] = letterbox_image(buff_[0], net_->w, net_->h);
-  ipl_ = cvCreateImage(cvSize(buff_[0].w, buff_[0].h), IPL_DEPTH_8U, buff_[0].c);
+
+  std::vector<bool> bufferIsFull(numCameras_, false);
+  int img_idx;
+  image img;
+  std_msgs::Header hdr;
+  while (std::all_of(bufferIsFull.begin(), bufferIsFull.end(),
+         []{return true})){
+    {
+      boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
+      IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
+      IplImage* ROS_img = imageAndHeader.image;
+      img = ipl_to_image(ROS_img);
+      hdr = imageAndHeader.header;
+    }
+    img_idx = cameraFrameIDsMap[hdr.frame_id];
+    if (bufferIsFull[img_idx])
+      continue;
+    buff_[0][img_idx] = img;
+    headerBuff_[0][img_idx] = img;
+    bufferIsFull[img_idx] = true;
+  }
+
+  for(int idx=1; idx<=2; idx++){
+    for(int idy=0; idy<numCameras_; idy++){
+      buff_[idx][idy] = buff[0][idy];
+      headerBuff_[idx][idy] = headerBuff_[0][idy];
+    }
+  }
+  buffLetter_[0] = imgs_to_letterbox_matrix(buff_[0], numCameras_);
+  buffLetter_[1] = copy_matrix(buffLetter_[0]);
+  buffLetter_[2] = copy_matrix(buffLetter_[0]);
+  ipl_ = cvCreateImage(cvSize(buff_[0][0].w, buff_[0][0].h), IPL_DEPTH_8U,
+                       buff_[0][0].c);
 
   int count = 0;
 
