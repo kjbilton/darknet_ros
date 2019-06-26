@@ -29,5 +29,9 @@ matrix imgs_to_letterbox_matrix(image *imgs, int n_imgs){
     letterbox_im[idx] = letterbox_image((*imgs)[idx], imgs[0]->w, imgs[0]->h);
 
   matrix mat = imgs_as_matrix(letterbox_im, n_imgs);
+  for (int i=0; i < n_imgs; i++) {
+      free_image(letterbox_im[i]);
+  }
+
   return mat;
 }

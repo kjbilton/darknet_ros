@@ -356,6 +356,7 @@ void *YoloObjectDetector::detectInThread()
     printf("\nFPS:%.1f\n",fps_);
     printf("Objects:\n\n");
   }
+  // TODO: get rid of display for prototyping
   image display = buff_[(buffIndex_+2) % 3];
   draw_detections(display, dets, nboxes, demoThresh_, demoNames_, demoAlphabet_, demoClasses_);
 
@@ -437,7 +438,7 @@ void *YoloObjectDetector::fetchInThread()
       img_idx = cameraFrameIDsMap[hdr.frame_id];
       if (bufferIsFull[img_idx])
         continue;
-        
+
       rgbgr_image(img)
       buff_[buffIndex_][img_idx] = img;
       headerBuff_[buffIndex_][img_idx] = img;

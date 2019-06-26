@@ -4,6 +4,8 @@
 #include "image.h"
 #include "matrix.h"
 
-matrix img_to_letterbox_matrix(image *img);
+matrix imgs_to_matrix(image *imgs, int n_images)
+matrix imgs_to_letterbox_matrix(image *img);
+
 
 #endif
