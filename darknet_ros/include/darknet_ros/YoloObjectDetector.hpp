@@ -49,6 +49,7 @@
 
 extern "C" {
 // #include "darknet.h"
+#include "darknet_ros/batch.h"
 #include "matrix.h"
 #include "network.h"
 #include "detection_layer.h"
@@ -64,6 +65,7 @@ extern "C" {
 extern "C" void ipl_into_image(IplImage* src, image im);
 extern "C" image ipl_to_image(IplImage* src);
 extern "C" void show_image_cv(image p, const char *name, IplImage *disp);
+extern "C" matrix imgs_to_letterbox_matrix(image **imgs, int n_imgs, int w, int h);
 
 namespace darknet_ros {
 
@@ -184,7 +186,7 @@ class YoloObjectDetector
   matrix buffLetter_[3];
   int *buffId_[3];
   int buffIndex_ = 0;
-  IplImage *ipl_;
+  IplImage **ipl_;
   float fps_ = 0;
   float demoThresh_ = 0;
   float demoHier_ = .5;

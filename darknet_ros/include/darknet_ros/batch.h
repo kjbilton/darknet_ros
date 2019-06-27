@@ -5,8 +5,8 @@
 #include "matrix.h"
 #include "network.h"
 
-matrix imgs_to_matrix(image *imgs, int n_images)
-matrix imgs_to_letterbox_matrix(image *img);
+matrix imgs_to_letterbox_matrix(image **imgs, int n_imgs, int w, int h);
+matrix imgs_to_matrix(image *imgs, int n_imgs);
 
 void shift_output_ptr(network *net);
 void get_base_output(network *net, float ***addr);

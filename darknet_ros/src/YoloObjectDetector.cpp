@@ -85,7 +85,7 @@ bool YoloObjectDetector::readParameters()
   rosBoxCounter_ = std::vector<std::vector<int> >(numCameras_);
 
   for(int idx = 0; idx < numCameras_; idx++) {
-    rosBoxes_[idx] = std::vector<std::vector<RosBox_>(numClasses_);
+    rosBoxes_[idx] = std::vector<std::vector<RosBox_> >(numClasses_);
     rosBoxCounter_[idx] = std::vector<int>(numClasses_);
   }
 
@@ -342,11 +342,12 @@ detection **YoloObjectDetector::avgPredictions(network *net, int **nboxes)
   float **base_output;
   get_base_output(net, &base_output);
 
-  detection *dets = new detection[numCameras_];
+  detection **dets = new detection*[numCameras_];
   for(int b = 0; b < net->batch; ++b) {
     detection *detsBatch = get_network_boxes(net, buff_[0][0].w, buff_[0][0].h,
-      demoThresh_, demoHier_, 0, 1, (*nboxes)[b]);
-    (*dets)[b] = detsBatch;
+      demoThresh_, demoHier_, 0, 1, &(*nboxes)[b]);
+    dets[b] = detsBatch;
+    //(*dets)[b] = detsBatch;
     shift_output_ptr(net);
   }
   restore_output_addr(net, base_output);
@@ -360,7 +361,11 @@ void *YoloObjectDetector::detectInThread()
   float nms = .4;
 
   layer l = net_->layers[net_->n - 1];
-  float *X = buffLetter_[(buffIndex_ + 2) % 3].vals;
+  float *X = new float[net_->batch * net_-> w * net_->h * 3];
+  for(int idx = 0; idx < net_->batch; idx++) {
+    memcpy(X + idx * net_-> w * net_->h * 3, buffLetter_[(buffIndex_ + 2) % 3].vals[idx], net_-> w * net_->h * 3 * sizeof(float));
+  }
+
   float *prediction = network_predict(net_, X);
 
   rememberNetwork(net_);
@@ -437,6 +442,7 @@ void *YoloObjectDetector::detectInThread()
     }
   }
 
+  delete [] X;
   delete [] dets;
   delete [] nboxes;
   demoIndex_ = (demoIndex_ + 1) % demoFrame_;
@@ -460,7 +466,7 @@ void *YoloObjectDetector::fetchInThread()
       boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
       imageAndHeader = getIplImageWithHeader();
       ROS_img = imageAndHeader.image;
-      ipl_to_image(ROS_img, img);
+      img = ipl_to_image(ROS_img);
       hdr = imageAndHeader.header;
       id = actionId_;
     }
@@ -468,13 +474,13 @@ void *YoloObjectDetector::fetchInThread()
     if (bufferIsFull[img_idx]) {
       continue;
     }
-    rgbgr_image(img)
+    rgbgr_image(img);
     buff_[buffIndex_][img_idx] = img;
-    headerBuff_[buffIndex_][img_idx] = img;
+    headerBuff_[buffIndex_][img_idx] = hdr;
     bufferIsFull[img_idx] = true;
   }
-  buffLetter_[buffIndex_] = imgs_to_letterbox_matrix(buff_[buffIndex_],
-                                                     numCameras_);
+  buffLetter_[buffIndex_] = imgs_to_letterbox_matrix(&buff_[buffIndex_],
+                                                     numCameras_, net_->w, net_->h);
   return 0;
 }
 
@@ -585,31 +591,31 @@ void YoloObjectDetector::yolo()
       boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
       IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
       IplImage* ROS_img = imageAndHeader.image;
-      ipl_to_image(ROS_img, img);
+      img = ipl_to_image(ROS_img);
       hdr = imageAndHeader.header;
     }
     img_idx = cameraFrameIDsMap[hdr.frame_id];
     if (bufferIsFull[img_idx]) {
       continue;
     }
-    rgbgr_image(img)
+    rgbgr_image(img);
     buff_[0][img_idx] = img;
-    headerBuff_[0][img_idx] = img;
+    headerBuff_[0][img_idx] = hdr;
     bufferIsFull[img_idx] = true;
   }
 
   // Copy first batch of images to remaining buffer indices
   for(int idx = 1; idx < 3; idx++) {
     for(int idy = 0; idy < numCameras_; idy++) {
-      buff_[idx][idy] = buff[0][idy];
+      buff_[idx][idy] = buff_[0][idy];
       headerBuff_[idx][idy] = headerBuff_[0][idy];
     }
   }
-  buffLetter_[0] = imgs_to_letterbox_matrix(buff_[0], numCameras_);
+  buffLetter_[0] = imgs_to_letterbox_matrix(&buff_[0], numCameras_, net_->w, net_->h);
   buffLetter_[1] = copy_matrix(buffLetter_[0]);
   buffLetter_[2] = copy_matrix(buffLetter_[0]);
 
-  ipl_ = new IplImage[numCameras_];
+  ipl_ = new IplImage*[numCameras_];
   for(int idx = 0; idx < numCameras_; idx++) {
     ipl_[idx] = cvCreateImage(cvSize(buff_[0][idx].w, buff_[0][idx].h),
                               IPL_DEPTH_8U, buff_[0][idx].c);
@@ -643,7 +649,8 @@ void YoloObjectDetector::yolo()
     } else {
       char name[256];
       sprintf(name, "%s_%08d", demoPrefix_, count);
-      save_image(buff_[(buffIndex_ + 1) % 3], name);
+      // TODO: Iterate over all images to save
+      // save_image(buff_[(buffIndex_ + 1) % 3], name);
     }
     fetch_thread.join();
     detect_thread.join();
@@ -690,7 +697,6 @@ void *YoloObjectDetector::publishInThread()
       for (int i = 0; i < num; i++) {
         for (int j = 0; j < numClasses_; j++) {
           if (roiBoxes_[idx][i].Class == j) {
-            // TODO: Modify rosBoxes_ and rosBoxCounter_ for multiple cameras
             rosBoxes_[idx][j].push_back(roiBoxes_[idx][i]);
             rosBoxCounter_[idx][j]++;
           }
@@ -706,13 +712,13 @@ void *YoloObjectDetector::publishInThread()
           darknet_ros_msgs::BoundingBox boundingBox;
 
           for (int j = 0; j < rosBoxCounter_[idx][i]; j++) {
-            int xmin = (rosBoxes_[k][i][j].x - rosBoxes_[k][i][j].w / 2) * frameWidth_;
-            int ymin = (rosBoxes_[k][i][j].y - rosBoxes_[k][i][j].h / 2) * frameHeight_;
-            int xmax = (rosBoxes_[k][i][j].x + rosBoxes_[k][i][j].w / 2) * frameWidth_;
-            int ymax = (rosBoxes_[k][i][j].y + rosBoxes_[k][i][j].h / 2) * frameHeight_;
+            int xmin = (rosBoxes_[idx][i][j].x - rosBoxes_[idx][i][j].w / 2) * frameWidth_;
+            int ymin = (rosBoxes_[idx][i][j].y - rosBoxes_[idx][i][j].h / 2) * frameHeight_;
+            int xmax = (rosBoxes_[idx][i][j].x + rosBoxes_[idx][i][j].w / 2) * frameWidth_;
+            int ymax = (rosBoxes_[idx][i][j].y + rosBoxes_[idx][i][j].h / 2) * frameHeight_;
 
             boundingBox.Class = classLabels_[i];
-            boundingBox.probability = rosBoxes_[k][i][j].prob;
+            boundingBox.probability = rosBoxes_[idx][i][j].prob;
             boundingBox.xmin = xmin;
             boundingBox.ymin = ymin;
             boundingBox.xmax = xmax;
@@ -736,7 +742,8 @@ void *YoloObjectDetector::publishInThread()
   if (isCheckingForObjects()) {
     ROS_DEBUG("[YoloObjectDetector] check for objects in image.");
     darknet_ros_msgs::CheckForObjectsResult objectsActionResult;
-    objectsActionResult.id = buffId_[0];
+    // TODO: fix actions
+    objectsActionResult.id = buffId_[0][0];
     objectsActionResult.bounding_boxes = boundingBoxesResults_;
     checkForObjectsActionServer_->setSucceeded(objectsActionResult, "Send bounding boxes.");
   }

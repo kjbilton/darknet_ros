@@ -95,6 +95,7 @@ if (CUDA_FOUND)
   )
 
   cuda_add_library(${PROJECT_NAME}_lib
+    src/batch.c
     src/YoloObjectDetector.cpp
     src/image_interface.c
 
@@ -159,6 +160,7 @@ if (CUDA_FOUND)
 else()
 
   add_library(${PROJECT_NAME}_lib
+    src/batch.c
     src/YoloObjectDetector.cpp
     src/image_interface.c
 
