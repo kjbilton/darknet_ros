@@ -48,7 +48,7 @@
 #endif
 
 extern "C" {
-#include "darknet.h"
+// #include "darknet.h"
 #include "matrix.h"
 #include "network.h"
 #include "detection_layer.h"
@@ -131,7 +131,7 @@ class YoloObjectDetector
    * Publishes the detection image.
    * @return true if successful.
    */
-  bool publishDetectionImage(const cv::Mat& detectionImage);
+  bool publishDetectionImage(const cv::Mat& detectionImage, int img_idx);
 
   //! Typedefs.
   typedef actionlib::SimpleActionServer<darknet_ros_msgs::CheckForObjectsAction> CheckForObjectsActionServer;
@@ -156,8 +156,8 @@ class YoloObjectDetector
   ros::Publisher boundingBoxesPublisher_;
 
   //! Detected objects.
-  std::vector<std::vector<RosBox_> > rosBoxes_;
-  std::vector<int> rosBoxCounter_;
+  std::vector<std::vector<std::vector<RosBox_> > > rosBoxes_;
+  std::vector<std::vector<int> > rosBoxCounter_;
   darknet_ros_msgs::BoundingBoxes boundingBoxesResults_;
 
   //! Camera related parameters.
@@ -184,7 +184,7 @@ class YoloObjectDetector
   matrix buffLetter_[3];
   int *buffId_[3];
   int buffIndex_ = 0;
-  IplImage * ipl_;
+  IplImage *ipl_;
   float fps_ = 0;
   float demoThresh_ = 0;
   float demoHier_ = .5;
@@ -201,7 +201,7 @@ class YoloObjectDetector
   int demoTotal_ = 0;
   double demoTime_;
 
-  RosBox_ *roiBoxes_;
+  RosBox_ **roiBoxes_;
   bool viewImage_;
   bool enableConsoleOutput_;
   int waitKeyDelay_;
@@ -227,7 +227,7 @@ class YoloObjectDetector
 
   void rememberNetwork(network *net);
 
-  detection *avgPredictions(network *net, int *nboxes);
+  detection **avgPredictions(network *net, int **nboxes);
 
   void *detectInThread();
 

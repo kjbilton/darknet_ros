@@ -72,8 +72,22 @@ bool YoloObjectDetector::readParameters()
   nodeHandle_.param("yolo_model/detection_classes/names", classLabels_,
                     std::vector<std::string>(0));
   numClasses_ = classLabels_.size();
-  rosBoxes_ = std::vector<std::vector<RosBox_> >(numClasses_);
-  rosBoxCounter_ = std::vector<int>(numClasses_);
+
+  // Set camera info.
+  nodeHandle_.param("subscribers/camera_reading/frame_ids", cameraFrameIDs,
+                    std::vector<std::string>(1, "frame_id"));
+  numCameras_ = cameraFrameIDs.size();
+  for(int idx = 0; idx < numCameras_; idx++) {
+    cameraFrameIDsMap[cameraFrameIDs[idx]] = idx;
+  }
+
+  rosBoxes_ = std::vector<std::vector<std::vector<RosBox_> > >(numCameras_);
+  rosBoxCounter_ = std::vector<std::vector<int> >(numCameras_);
+
+  for(int idx = 0; idx < numCameras_; idx++) {
+    rosBoxes_[idx] = std::vector<std::vector<RosBox_>(numClasses_);
+    rosBoxCounter_[idx] = std::vector<int>(numClasses_);
+  }
 
   return true;
 }
@@ -121,11 +135,6 @@ void YoloObjectDetector::init()
     strcpy(detectionNames[i], classLabels_[i].c_str());
   }
 
-  // Set camera info.
-  numCameras_ = cameraFrameIDs.size();
-  for(int idx=0; idx<cameraFrameIDs.size(); idx++)
-    cameraFrameIDsMap[cameraFrameIDs[idx]] = idx;
-
   // Load network.
   setupNetwork(cfg, weights, data, thresh, detectionNames, numClasses_,
                numCameras_, 0, 0, 1, 0.5, 0, 0, 0, 0);
@@ -133,7 +142,6 @@ void YoloObjectDetector::init()
 
   // Initialize publisher and subscriber.
   std::string cameraTopicName;
-  std::vector<std::string> cameraFrameIDsDefault("frame_id");
   int cameraQueueSize;
   std::string objectDetectorTopicName;
   int objectDetectorQueueSize;
@@ -147,8 +155,6 @@ void YoloObjectDetector::init()
 
   nodeHandle_.param("subscribers/camera_reading/topic", cameraTopicName,
                     std::string("/camera/image_raw"));
-  nodeHandle_.param("subscribers/camera_reading/frame_ids", cameraFrameIDs,
-                    cameraFrameIDsDefault);
   nodeHandle_.param("subscribers/camera_reading/queue_size", cameraQueueSize,
                     1);
   nodeHandle_.param("publishers/object_detector/topic", objectDetectorTopicName,
@@ -266,13 +272,14 @@ bool YoloObjectDetector::isCheckingForObjects() const
       && !checkForObjectsActionServer_->isPreemptRequested());
 }
 
-bool YoloObjectDetector::publishDetectionImage(const cv::Mat& detectionImage)
+bool YoloObjectDetector::publishDetectionImage(const cv::Mat& detectionImage,
+  int img_idx)
 {
   if (detectionImagePublisher_.getNumSubscribers() < 1)
     return false;
   cv_bridge::CvImage cvImage;
   cvImage.header.stamp = ros::Time::now();
-  cvImage.header.frame_id = "detection_image";
+  cvImage.header.frame_id = headerBuff_[(buffIndex_ + 1) % 3][img_idx].frame_id;
   cvImage.encoding = sensor_msgs::image_encodings::BGR8;
   cvImage.image = detectionImage;
   detectionImagePublisher_.publish(*cvImage.toImageMsg());
@@ -315,22 +322,35 @@ void YoloObjectDetector::rememberNetwork(network *net)
   }
 }
 
-detection *YoloObjectDetector::avgPredictions(network *net, int *nboxes)
+detection **YoloObjectDetector::avgPredictions(network *net, int **nboxes)
 {
-  int i, j;
-  int count = 0;
-  fill_cpu(demoTotal_, 0, avg_, 1);
-  for(j = 0; j < demoFrame_; ++j){
-    axpy_cpu(demoTotal_, 1./demoFrame_, predictions_[j], 1, avg_, 1);
+  // int i, j;
+  // int count = 0;
+  // fill_cpu(demoTotal_, 0, avg_, 1);
+  // for(j = 0; j < demoFrame_; ++j){
+  //   axpy_cpu(demoTotal_, 1./demoFrame_, predictions_[j], 1, avg_, 1);
+  // }
+  // for(i = 0; i < net->n; ++i){
+  //   layer l = net->layers[i];
+  //   if(l.type == YOLO || l.type == REGION || l.type == DETECTION){
+  //     memcpy(l.output, avg_ + count, sizeof(float) * l.outputs);
+  //     count += l.outputs;
+  //   }
+  // }
+  // detection *dets = get_network_boxes(net, buff_[0].w, buff_[0].h, demoThresh_, demoHier_, 0, 1, nboxes);
+
+  float **base_output;
+  get_base_output(net, &base_output);
+
+  detection *dets = new detection[numCameras_];
+  for(int b = 0; b < net->batch; ++b) {
+    detection *detsBatch = get_network_boxes(net, buff_[0][0].w, buff_[0][0].h,
+      demoThresh_, demoHier_, 0, 1, (*nboxes)[b]);
+    (*dets)[b] = detsBatch;
+    shift_output_ptr(net);
   }
-  for(i = 0; i < net->n; ++i){
-    layer l = net->layers[i];
-    if(l.type == YOLO || l.type == REGION || l.type == DETECTION){
-      memcpy(l.output, avg_ + count, sizeof(float) * l.outputs);
-      count += l.outputs;
-    }
-  }
-  detection *dets = get_network_boxes(net, buff_[0].w, buff_[0].h, demoThresh_, demoHier_, 0, 1, nboxes);
+  restore_output_addr(net, base_output);
+  free(base_output);
   return dets;
 }
 
@@ -340,76 +360,85 @@ void *YoloObjectDetector::detectInThread()
   float nms = .4;
 
   layer l = net_->layers[net_->n - 1];
-  float *X = buffLetter_[(buffIndex_ + 2) % 3].data;
+  float *X = buffLetter_[(buffIndex_ + 2) % 3].vals;
   float *prediction = network_predict(net_, X);
 
   rememberNetwork(net_);
-  detection *dets = 0;
-  int nboxes = 0;
+  detection **dets = new detection*[numCameras_];
+  int *nboxes = new int[numCameras_];
   dets = avgPredictions(net_, &nboxes);
 
-  if (nms > 0) do_nms_obj(dets, nboxes, l.classes, nms);
+  if (nms > 0)
+    for(int idx = 0; idx < numCameras_; idx++)
+      do_nms_obj(dets[idx], nboxes[idx], l.classes, nms);
 
-  if (enableConsoleOutput_) {
-    printf("\033[2J");
-    printf("\033[1;1H");
-    printf("\nFPS:%.1f\n",fps_);
-    printf("Objects:\n\n");
-  }
-  // TODO: get rid of display for prototyping
-  image display = buff_[(buffIndex_+2) % 3];
-  draw_detections(display, dets, nboxes, demoThresh_, demoNames_, demoAlphabet_, demoClasses_);
+  // TODO: adjust output for multiple images
+  // if (enableConsoleOutput_) {
+  //   printf("\033[2J");
+  //   printf("\033[1;1H");
+  //   printf("\nFPS:%.1f\n",fps_);
+  //   printf("Objects:\n\n");
+  // }
+  // image display = buff_[(buffIndex_+2) % 3];
+  // draw_detections(display, dets, nboxes, demoThresh_, demoNames_, demoAlphabet_, demoClasses_);
 
   // extract the bounding boxes and send them to ROS
-  int i, j;
-  int count = 0;
-  for (i = 0; i < nboxes; ++i) {
-    float xmin = dets[i].bbox.x - dets[i].bbox.w / 2.;
-    float xmax = dets[i].bbox.x + dets[i].bbox.w / 2.;
-    float ymin = dets[i].bbox.y - dets[i].bbox.h / 2.;
-    float ymax = dets[i].bbox.y + dets[i].bbox.h / 2.;
+  int i, j, k;
+  int count;
+  // Iterate through all cameras
+  for (k = 0; k < numCameras_; k++) {
+    count = 0;
+    // Iterate through all boxes in each camera
+    for (i = 0; i < nboxes[k]; ++i) {
+      float xmin = dets[k][i].bbox.x - dets[k][i].bbox.w / 2.;
+      float xmax = dets[k][i].bbox.x + dets[k][i].bbox.w / 2.;
+      float ymin = dets[k][i].bbox.y - dets[k][i].bbox.h / 2.;
+      float ymax = dets[k][i].bbox.y + dets[k][i].bbox.h / 2.;
 
-    if (xmin < 0)
-      xmin = 0;
-    if (ymin < 0)
-      ymin = 0;
-    if (xmax > 1)
-      xmax = 1;
-    if (ymax > 1)
-      ymax = 1;
+      if (xmin < 0)
+        xmin = 0;
+      if (ymin < 0)
+        ymin = 0;
+      if (xmax > 1)
+        xmax = 1;
+      if (ymax > 1)
+        ymax = 1;
 
-    // iterate through possible boxes and collect the bounding boxes
-    for (j = 0; j < demoClasses_; ++j) {
-      if (dets[i].prob[j]) {
-        float x_center = (xmin + xmax) / 2;
-        float y_center = (ymin + ymax) / 2;
-        float BoundingBox_width = xmax - xmin;
-        float BoundingBox_height = ymax - ymin;
+      // iterate through possible boxes and collect the bounding boxes
+      for (j = 0; j < demoClasses_; ++j) {
+        if (dets[k][i].prob[j]) {
+          float x_center = (xmin + xmax) / 2;
+          float y_center = (ymin + ymax) / 2;
+          float BoundingBox_width = xmax - xmin;
+          float BoundingBox_height = ymax - ymin;
 
-        // define bounding box
-        // BoundingBox must be 1% size of frame (3.2x2.4 pixels)
-        if (BoundingBox_width > 0.01 && BoundingBox_height > 0.01) {
-          roiBoxes_[count].x = x_center;
-          roiBoxes_[count].y = y_center;
-          roiBoxes_[count].w = BoundingBox_width;
-          roiBoxes_[count].h = BoundingBox_height;
-          roiBoxes_[count].Class = j;
-          roiBoxes_[count].prob = dets[i].prob[j];
-          count++;
+          // define bounding box
+          // BoundingBox must be 1% size of frame (3.2x2.4 pixels)
+          if (BoundingBox_width > 0.01 && BoundingBox_height > 0.01) {
+            roiBoxes_[k][count].x = x_center;
+            roiBoxes_[k][count].y = y_center;
+            roiBoxes_[k][count].w = BoundingBox_width;
+            roiBoxes_[k][count].h = BoundingBox_height;
+            roiBoxes_[k][count].Class = j;
+            roiBoxes_[k][count].prob = dets[k][i].prob[j];
+            count++;
+          }
         }
       }
     }
+
+    // create array to store found bounding boxes
+    // if no object detected, make sure that ROS knows that num = 0
+    if (count == 0) {
+      roiBoxes_[k][0].num = 0;
+    }
+    else {
+      roiBoxes_[k][0].num = count;
+    }
   }
 
-  // create array to store found bounding boxes
-  // if no object detected, make sure that ROS knows that num = 0
-  if (count == 0) {
-    roiBoxes_[0].num = 0;
-  } else {
-    roiBoxes_[0].num = count;
-  }
-
-  free_detections(dets, nboxes);
+  delete [] dets;
+  delete [] nboxes;
   demoIndex_ = (demoIndex_ + 1) % demoFrame_;
   running_ = 0;
   return 0;
@@ -425,8 +454,8 @@ void *YoloObjectDetector::fetchInThread()
   IplImage* ROS_img;
   int id;
 
-  while (std::all_of(bufferIsFull.begin(), bufferIsFull.end(),
-         []{return true})){
+  while (! std::all_of(bufferIsFull.begin(), bufferIsFull.end(),
+         [](bool v) { return v; })){
     {
       boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
       imageAndHeader = getIplImageWithHeader();
@@ -434,16 +463,15 @@ void *YoloObjectDetector::fetchInThread()
       ipl_to_image(ROS_img, img);
       hdr = imageAndHeader.header;
       id = actionId_;
-
-      img_idx = cameraFrameIDsMap[hdr.frame_id];
-      if (bufferIsFull[img_idx])
-        continue;
-
-      rgbgr_image(img)
-      buff_[buffIndex_][img_idx] = img;
-      headerBuff_[buffIndex_][img_idx] = img;
-      bufferIsFull[img_idx] = true;
     }
+    img_idx = cameraFrameIDsMap[hdr.frame_id];
+    if (bufferIsFull[img_idx]) {
+      continue;
+    }
+    rgbgr_image(img)
+    buff_[buffIndex_][img_idx] = img;
+    headerBuff_[buffIndex_][img_idx] = img;
+    bufferIsFull[img_idx] = true;
   }
   buffLetter_[buffIndex_] = imgs_to_letterbox_matrix(buff_[buffIndex_],
                                                      numCameras_);
@@ -452,7 +480,9 @@ void *YoloObjectDetector::fetchInThread()
 
 void *YoloObjectDetector::displayInThread(void *ptr)
 {
-  show_image_cv(buff_[(buffIndex_ + 1)%3], "YOLO V3", ipl_);
+  for(int idx = 0; idx < numCameras_; idx++) {
+    show_image_cv(buff_[(buffIndex_ + 1) % 3][idx], "YOLO V3", ipl_[idx]);
+  }
   int c = cvWaitKey(waitKeyDelay_);
   if (c != -1) c = c%256;
   if (c == 27) {
@@ -531,37 +561,46 @@ void YoloObjectDetector::yolo()
   avg_ = (float *) calloc(demoTotal_, sizeof(float));
 
   layer l = net_->layers[net_->n - 1];
-  roiBoxes_ = (darknet_ros::RosBox_ *) calloc(l.w * l.h * l.n, sizeof(darknet_ros::RosBox_));
+  roiBoxes_ = new darknet_ros::RosBox_*[numCameras_];
+  for(int idx = 0; idx < numCameras_; idx++) {
+    roiBoxes_[idx] = (darknet_ros::RosBox_ *) calloc(l.w * l.h * l.n,
+      sizeof(darknet_ros::RosBox_));
+  }
 
-  for(int idx=0; idx<=3; idx++){
+  // Allocate memory for buffers
+  for(int idx = 0; idx < 3; idx++){
     buff_[idx] = new image[numCameras_];
     headerBuff_[idx] = new std_msgs::Header[numCameras_];
     buffId_[idx] = new int[numCameras_];
   }
 
+  // Initialize buffers with first batch of images
   std::vector<bool> bufferIsFull(numCameras_, false);
   int img_idx;
   image img;
   std_msgs::Header hdr;
-  while (std::all_of(bufferIsFull.begin(), bufferIsFull.end(),
-         []{return true})){
+  while (! std::all_of(bufferIsFull.begin(), bufferIsFull.end(),
+         [](bool v) { return v; })) {
     {
       boost::shared_lock<boost::shared_mutex> lock(mutexImageCallback_);
       IplImageWithHeader_ imageAndHeader = getIplImageWithHeader();
       IplImage* ROS_img = imageAndHeader.image;
-      img = ipl_to_image(ROS_img);
+      ipl_to_image(ROS_img, img);
       hdr = imageAndHeader.header;
     }
     img_idx = cameraFrameIDsMap[hdr.frame_id];
-    if (bufferIsFull[img_idx])
+    if (bufferIsFull[img_idx]) {
       continue;
+    }
+    rgbgr_image(img)
     buff_[0][img_idx] = img;
     headerBuff_[0][img_idx] = img;
     bufferIsFull[img_idx] = true;
   }
 
-  for(int idx=1; idx<=2; idx++){
-    for(int idy=0; idy<numCameras_; idy++){
+  // Copy first batch of images to remaining buffer indices
+  for(int idx = 1; idx < 3; idx++) {
+    for(int idy = 0; idy < numCameras_; idy++) {
       buff_[idx][idy] = buff[0][idy];
       headerBuff_[idx][idy] = headerBuff_[0][idy];
     }
@@ -569,8 +608,12 @@ void YoloObjectDetector::yolo()
   buffLetter_[0] = imgs_to_letterbox_matrix(buff_[0], numCameras_);
   buffLetter_[1] = copy_matrix(buffLetter_[0]);
   buffLetter_[2] = copy_matrix(buffLetter_[0]);
-  ipl_ = cvCreateImage(cvSize(buff_[0][0].w, buff_[0][0].h), IPL_DEPTH_8U,
-                       buff_[0][0].c);
+
+  ipl_ = new IplImage[numCameras_];
+  for(int idx = 0; idx < numCameras_; idx++) {
+    ipl_[idx] = cvCreateImage(cvSize(buff_[0][idx].w, buff_[0][idx].h),
+                              IPL_DEPTH_8U, buff_[0][idx].c);
+  }
 
   int count = 0;
 
@@ -633,57 +676,63 @@ bool YoloObjectDetector::isNodeRunning(void)
 
 void *YoloObjectDetector::publishInThread()
 {
-  // Publish image.
-  cv::Mat cvImage = cv::cvarrToMat(ipl_);
-  if (!publishDetectionImage(cv::Mat(cvImage))) {
-    ROS_DEBUG("Detection image has not been broadcasted.");
-  }
-
-  // Publish bounding boxes and detection result.
-  int num = roiBoxes_[0].num;
-  if (num > 0 && num <= 100) {
-    for (int i = 0; i < num; i++) {
-      for (int j = 0; j < numClasses_; j++) {
-        if (roiBoxes_[i].Class == j) {
-          rosBoxes_[j].push_back(roiBoxes_[i]);
-          rosBoxCounter_[j]++;
-        }
-      }
+  // Publish images.
+  cv::Mat cvImage;
+  for(int idx = 0; idx < numCameras_; idx++) {
+    cvImage= cv::cvarrToMat(ipl_[idx]);
+    if (!publishDetectionImage(cv::Mat(cvImage), idx)) {
+      ROS_DEBUG("Detection image has not been broadcasted.");
     }
 
-    std_msgs::Int8 msg;
-    msg.data = num;
-    objectPublisher_.publish(msg);
-
-    for (int i = 0; i < numClasses_; i++) {
-      if (rosBoxCounter_[i] > 0) {
-        darknet_ros_msgs::BoundingBox boundingBox;
-
-        for (int j = 0; j < rosBoxCounter_[i]; j++) {
-          int xmin = (rosBoxes_[i][j].x - rosBoxes_[i][j].w / 2) * frameWidth_;
-          int ymin = (rosBoxes_[i][j].y - rosBoxes_[i][j].h / 2) * frameHeight_;
-          int xmax = (rosBoxes_[i][j].x + rosBoxes_[i][j].w / 2) * frameWidth_;
-          int ymax = (rosBoxes_[i][j].y + rosBoxes_[i][j].h / 2) * frameHeight_;
-
-          boundingBox.Class = classLabels_[i];
-          boundingBox.probability = rosBoxes_[i][j].prob;
-          boundingBox.xmin = xmin;
-          boundingBox.ymin = ymin;
-          boundingBox.xmax = xmax;
-          boundingBox.ymax = ymax;
-          boundingBoxesResults_.bounding_boxes.push_back(boundingBox);
+    // Publish bounding boxes and detection result.
+    int num = roiBoxes_[idx][0].num;
+    if (num > 0 && num <= 100) {
+      for (int i = 0; i < num; i++) {
+        for (int j = 0; j < numClasses_; j++) {
+          if (roiBoxes_[idx][i].Class == j) {
+            // TODO: Modify rosBoxes_ and rosBoxCounter_ for multiple cameras
+            rosBoxes_[idx][j].push_back(roiBoxes_[idx][i]);
+            rosBoxCounter_[idx][j]++;
+          }
         }
       }
-    }
-    boundingBoxesResults_.header.stamp = ros::Time::now();
-    boundingBoxesResults_.header.frame_id = "detection";
-    boundingBoxesResults_.image_header = headerBuff_[(buffIndex_ + 1) % 3];
-    boundingBoxesPublisher_.publish(boundingBoxesResults_);
-  } else {
-    std_msgs::Int8 msg;
-    msg.data = 0;
-    objectPublisher_.publish(msg);
+      // TODO: add header to msg to know which camera it comes from?
+      std_msgs::Int8 msg;
+      msg.data = num;
+      objectPublisher_.publish(msg);
+
+      for (int i = 0; i < numClasses_; i++) {
+        if (rosBoxCounter_[idx][i] > 0) {
+          darknet_ros_msgs::BoundingBox boundingBox;
+
+          for (int j = 0; j < rosBoxCounter_[idx][i]; j++) {
+            int xmin = (rosBoxes_[k][i][j].x - rosBoxes_[k][i][j].w / 2) * frameWidth_;
+            int ymin = (rosBoxes_[k][i][j].y - rosBoxes_[k][i][j].h / 2) * frameHeight_;
+            int xmax = (rosBoxes_[k][i][j].x + rosBoxes_[k][i][j].w / 2) * frameWidth_;
+            int ymax = (rosBoxes_[k][i][j].y + rosBoxes_[k][i][j].h / 2) * frameHeight_;
+
+            boundingBox.Class = classLabels_[i];
+            boundingBox.probability = rosBoxes_[k][i][j].prob;
+            boundingBox.xmin = xmin;
+            boundingBox.ymin = ymin;
+            boundingBox.xmax = xmax;
+            boundingBox.ymax = ymax;
+            boundingBoxesResults_.bounding_boxes.push_back(boundingBox);
+          }
+        }
+      }
+      boundingBoxesResults_.header.stamp = ros::Time::now();
+      boundingBoxesResults_.header.frame_id = "detection";
+      boundingBoxesResults_.image_header = headerBuff_[(buffIndex_ + 1) % 3][idx];
+      boundingBoxesPublisher_.publish(boundingBoxesResults_);
+      boundingBoxesResults_.bounding_boxes.clear();
+    } else {
+      std_msgs::Int8 msg;
+      msg.data = 0;
+      objectPublisher_.publish(msg);
   }
+}
+
   if (isCheckingForObjects()) {
     ROS_DEBUG("[YoloObjectDetector] check for objects in image.");
     darknet_ros_msgs::CheckForObjectsResult objectsActionResult;
@@ -691,10 +740,12 @@ void *YoloObjectDetector::publishInThread()
     objectsActionResult.bounding_boxes = boundingBoxesResults_;
     checkForObjectsActionServer_->setSucceeded(objectsActionResult, "Send bounding boxes.");
   }
-  boundingBoxesResults_.bounding_boxes.clear();
-  for (int i = 0; i < numClasses_; i++) {
-    rosBoxes_[i].clear();
-    rosBoxCounter_[i] = 0;
+
+  for (int k = 0; k < numCameras_; k++) {
+    for (int i = 0; i < numClasses_; i++) {
+      rosBoxes_[k][i].clear();
+      rosBoxCounter_[k][i] = 0;
+    }
   }
 
   return 0;

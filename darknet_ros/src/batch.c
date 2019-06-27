@@ -35,3 +35,45 @@ matrix imgs_to_letterbox_matrix(image *imgs, int n_imgs){
 
   return mat;
 }
+
+void get_base_output(network *net, float ***addr){
+	int num = 0;
+	int k = 0;
+	int i;
+	for(i = 0; i < net->n; ++i) {
+		layer *l = &(net->layers[i]);
+		if (l->type == YOLO) {
+			num++;
+		}
+	}
+	*addr = calloc(num, sizeof(float**));
+	for(i = 0; i < net->n; ++i) {
+		layer *l = &(net->layers[i]);
+		if (l->type == YOLO) {
+			(*addr)[k] = l->output;
+			k++;
+		}
+	}
+}
+
+void shift_output_ptr(network *net){
+	int i;
+	for(i = 0; i < net->n; ++i) {
+		layer *l = &(net->layers[i]);
+		if (l->type == YOLO) {
+			l->output += l->outputs;
+		}
+	}
+}
+
+void restore_output_addr(network *net, float **addrs){
+	int k = 0;
+	int i;
+	for(i = 0; i < net->n; ++i) {
+		layer *l = &(net->layers[i]);
+		if (l->type == YOLO) {
+			l->output = addrs[k];
+			k++;
+		}
+	}
+}
