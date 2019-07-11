@@ -536,6 +536,9 @@ void YoloObjectDetector::yolo()
     buffIndex_ = (buffIndex_ + 1) % 3;
     fetch_thread = std::thread(&YoloObjectDetector::fetchInThread, this);
     detect_thread = std::thread(&YoloObjectDetector::detectInThread, this);
+    fetch_thread.join();
+    detect_thread.join();
+
     if (!demoPrefix_) {
       fps_ = 1./(what_time_is_it_now() - demoTime_);
       demoTime_ = what_time_is_it_now();
@@ -548,8 +551,7 @@ void YoloObjectDetector::yolo()
       sprintf(name, "%s_%08d", demoPrefix_, count);
       save_image(buff_[(buffIndex_ + 1) % 3], name);
     }
-    fetch_thread.join();
-    detect_thread.join();
+
     ++count;
     if (!isNodeRunning()) {
       demoDone_ = true;
